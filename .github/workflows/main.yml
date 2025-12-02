@@ -1,152 +1,87 @@
-name: Build WHYRED kernel (NetHunter-ready, Clang-22)
+name: Kernel Build
 
 on:
   workflow_dispatch:
-    inputs:
-      jobs:
-        description: 'Number of parallel make jobs (optional)'
-        required: false
-        default: '4'
-
-env:
-  KERNEL_DEFCONFIG: whyred_defconfig
-  ODIR: out
-  CLANG_URL: https://github.com/ZyCromerZ/Clang/releases/download/22.0.0git-20250928-release/Clang-22.0.0git-20250928.tar.gz
-  CLANG_DIR: /usr/local/clang-22
-  ARCH: arm64
-  # cross prefix used for some parts; clang will be used as CC
-  CROSS_COMPILE: aarch64-linux-gnu-
-  NUM_JOBS: ${{ github.event.inputs.jobs || 4 }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    env:
+      TOOLCHAIN_DIR: ${{ github.workspace }}/weebx-clang
     steps:
-      - name: Checkout kernel source
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+    - name: Checkout kernel source
+      uses: actions/checkout@v4
 
-      - name: Install packages (build deps)
-        run: |
-          sudo apt-get update
-          # essentials for kernel building, dtc, and packaging
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential libncurses-dev bison flex libssl-dev bc rsync ccache \
-            device-tree-compiler binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi python3 python3-pip git wget unzip
-          # optional helpful tools
-          sudo apt-get install -y --no-install-recommends libelf-dev libelf1
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update -y
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          build-essential \
+          bc \
+          bison \
+          flex \
+          libncurses-dev \
+          libssl-dev \
+          libelf-dev \
+          device-tree-compiler \
+          dwarves \
+          ccache \
+          python3 \
+          python3-distutils \
+          pkg-config \
+          git \
+          unzip \
+          wget
 
-      - name: Setup ccache (optional)
-        run: |
-          mkdir -p ~/.ccache
-          echo "max_size = 5.0G" > ~/.ccache/ccache.conf
-          export CCACHE_DIR=~/.ccache
-          ccache -M 5G || true
+    - name: Clone Weebx Clang (weebx-clang)
+      run: |
+        git clone --depth=1 https://gitlab.com/XSans0/weebx-clang.git weebx-clang
+        if [ -d "weebx-clang/bin" ]; then chmod -R +x weebx-clang/bin || true; fi
+        echo "Toolchain location: $GITHUB_WORKSPACE/weebx-clang"
+        ls -la weebx-clang || true
 
-      - name: Download & extract ZyC Clang 22
-        run: |
-          sudo mkdir -p "${CLANG_DIR}"
-          wget -qO /tmp/clang22.tar.gz "${CLANG_URL}"
-          sudo tar -xzf /tmp/clang22.tar.gz -C /usr/local/
-          # If the tarball extracts to a folder named `Clang-...`, normalize symlink
-          EXTRACTED=$(sudo tar -tzf /tmp/clang22.tar.gz | head -1 | cut -f1 -d"/")
-          if [ -d "/usr/local/${EXTRACTED}" ]; then
-            sudo ln -sfn "/usr/local/${EXTRACTED}" "${CLANG_DIR}"
-          fi
-          sudo chmod -R a+rx "${CLANG_DIR}/bin" || true
-        env:
-          CLANG_URL: ${{ env.CLANG_URL }}
-          CLANG_DIR: ${{ env.CLANG_DIR }}
+    - name: Verify toolchain and environment
+      run: |
+        export PATH=${{ github.workspace }}/weebx-clang/bin:$PATH
+        echo "=== clang version ==="
+        if command -v clang >/dev/null 2>&1; then clang --version | head -n 1; else echo "clang not found in PATH"; exit 1; fi
+        echo "=== python version ==="
+        python3 --version || true
 
-      - name: Prepare build output dir & defconfig
-        run: |
-          export O=${ODIR}
-          make O=${ODIR} ARCH=${ARCH} ${KERNEL_DEFCONFIG}
+    - name: Quick defconfig verify (make whyred_defconfig)
+      working-directory: ${{ github.workspace }}
+      run: |
+        export PATH=${{ github.workspace }}/weebx-clang/bin:$PATH
+        make ARCH=arm64 O=out whyred_defconfig
+        if [ ! -f out/.config ]; then echo ".config not created"; ls -la out || true; exit 1; fi
+        echo "Defconfig applied successfully (out/.config exists)."
 
-      - name: Enable NetHunter-related configs (best-effort)
-        run: |
-          set -e
-          O=${ODIR}
-          # ensure scripts/config exists
-          if [ ! -x scripts/config ]; then
-            echo "scripts/config not found or not executable; ensure kernel source has scripts/kconfig/scripts/config"
-            exit 1
-          fi
-          # Common wireless / injection / netfilter / usb networking features
-          ./scripts/config --file ${O}/.config \
-            --enable CONFIG_CFG80211 \
-            --enable CONFIG_MAC80211 \
-            --enable CONFIG_NL80211 \
-            --enable CONFIG_WIRELESS_EXT \
-            --enable CONFIG_NET \
-            --enable CONFIG_PACKET \
-            --enable CONFIG_NETFILTER \
-            --enable CONFIG_NETFILTER_XTABLES \
-            --enable CONFIG_NETFILTER_XT_MATCH_MAC \
-            --enable CONFIG_NETFILTER_XT_MATCH_ADDRTYPE \
-            --enable CONFIG_NETFILTER_XT_TARGET_NFLOG \
-            --enable CONFIG_NF_CONNTRACK \
-            --enable CONFIG_NF_CONNTRACK_NETLINK \
-            --enable CONFIG_NF_NAT \
-            --enable CONFIG_BRIDGE_NETFILTER \
-            --enable CONFIG_USB_FUNCTIONS \
-            --enable CONFIG_USB_ETH \
-            --enable CONFIG_BT \
-            --module CONFIG_NET_9P
-          # enable monitor mode helpers (if available)
-          ./scripts/config --file ${O}/.config --enable CONFIG_CFG80211_DEFAULT_PS
-          # make olddefconfig to resolve depends and update config
-          yes "" | make O=${O} olddefconfig
+    - name: Android kernel build (use downloaded clang)
+      uses: lemniskett/android-kernel-actions@master
+      id: build
+      env:
+        NAME: Loganysl
+        PATH: ${{ github.workspace }}/weebx-clang/bin:${{ env.PATH }}
+        CC: ${{ github.workspace }}/weebx-clang/bin/clang
+      with:
+        arch: arm64
+        compiler: local
+        defconfig: whyred_defconfig
+        image: Image.gz-dtb
 
-      - name: Print selected config summary (wireless/netfilter)
-        run: |
-          O=${ODIR}
-          grep -E "CFG80211|MAC80211|NL80211|WIRELESS_EXT|NETFILTER|NET|PACKET|USB_ETH" ${O}/.config || true
+    - name: Show build outputs (debug)
+      if: always()
+      run: |
+        echo "Build step outputs:"
+        echo "outfile: ${{ steps.build.outputs.outfile }}"
+        ls -la out || true
+        find . -maxdepth 3 -type f -name "*.ko" -o -name "Image*" -print || true
 
-      - name: Build kernel (Image.gz-dtb)
-        run: |
-          set -e
-          export O=${ODIR}
-          export ARCH=${ARCH}
-          export PATH="${CLANG_DIR}/bin:${PATH}"
-          # Use clang as CC, enable LLVM build flags and lld as linker
-          export CC=clang
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          # Common variables used by Android/arm64 clang kernel builds
-          make -j${{ env.NUM_JOBS }} O=${ODIR} ARCH=${ARCH} CC=clang \
-            LD=ld.lld NM=clang++ OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            Image.gz-dtb
-
-      - name: Collect built artifacts
-        run: |
-          O=${ODIR}
-          mkdir -p artifacts
-          # typical location for arm64 Image.gz-dtb
-          if [ -f "${O}/arch/arm64/boot/Image.gz-dtb" ]; then
-            cp "${O}/arch/arm64/boot/Image.gz-dtb" artifacts/
-            echo "Found Image.gz-dtb at ${O}/arch/arm64/boot/Image.gz-dtb"
-          else
-            # fallback: try arch/arm64/boot/Image or Image.gz
-            cp -v ${O}/arch/arm64/boot/* artifacts/ || true
-          fi
-          # include kernel map and modules if built
-          if [ -d "${O}/lib/modules" ]; then
-            cp -r "${O}/lib/modules" artifacts/ || true
-          fi
-          tar -cJf artifacts/out-${GITHUB_RUN_ID}.tar.xz -C ${O} . || true
-          ls -lah artifacts || true
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-artifacts-whyred-${{ github.run_id }}
-          path: artifacts
-
-      - name: Show brief build info
-        run: |
-          echo "Build finished. Artifacts uploaded: kernel-artifacts-whyred-${{ github.run_id }}"
+    - name: Upload Kernel and Modules
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel_build
+        path: |
+          ${{ steps.build.outputs.outfile }}
+          ./out/*.ko
+          ./out/Image*
