@@ -62,11 +62,6 @@ jobs:
           CLANG_URL: ${{ env.CLANG_URL }}
           CLANG_DIR: ${{ env.CLANG_DIR }}
 
-      - name: Show clang version
-        run: |
-          "${CLANG_DIR}/bin/clang" --version
-          "${CLANG_DIR}/bin/ld.lld" --version || true
-
       - name: Prepare build output dir & defconfig
         run: |
           export O=${ODIR}
