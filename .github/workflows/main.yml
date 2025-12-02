@@ -1,66 +1,60 @@
-name: Kernel Build
+name: Kernel Build - Whyred
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
 
 jobs:
   build:
+    name: Compile Kernel
     runs-on: ubuntu-latest
-    env:
-      TOOLCHAIN_DIR: ${{ github.workspace }}/weebx-clang
+    timeout-minutes: 60
+
     steps:
-    - name: Checkout kernel source
-      uses: actions/checkout@v4
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
 
-    - name: Clone Weebx Clang (weebx-clang)
-      run: |
-        git clone --depth=1 https://gitlab.com/XSans0/weebx-clang.git weebx-clang
-        if [ -d "weebx-clang/bin" ]; then chmod -R +x weebx-clang/bin || true; fi
-        echo "Toolchain location: $GITHUB_WORKSPACE/weebx-clang"
-        ls -la weebx-clang || true
+      - name: Set up build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex gcc clang lld git \
+            libncurses-dev libssl-dev zip lzop python3 python3-pip \
+            rsync unzip wget
 
-    - name: Verify toolchain and environment
-      run: |
-        export PATH=${{ github.workspace }}/weebx-clang/bin:$PATH
-        echo "=== clang version ==="
-        if command -v clang >/dev/null 2>&1; then clang --version | head -n 1; else echo "clang not found in PATH"; exit 1; fi
-        echo "=== python version ==="
-        python3 --version || true
+      - name: Clone WeebX Clang
+        run: |
+          git clone --depth=1 https://gitlab.com/XSans0/weebx-clang.git clang
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
 
-    - name: Quick defconfig verify (make whyred_defconfig)
-      working-directory: ${{ github.workspace }}
-      run: |
-        export PATH=${{ github.workspace }}/weebx-clang/bin:$PATH
-        make ARCH=arm64 O=out whyred_defconfig
-        if [ ! -f out/.config ]; then echo ".config not created"; ls -la out || true; exit 1; fi
-        echo "Defconfig applied successfully (out/.config exists)."
+      - name: Configure Kernel (whyred_defconfig)
+        run: |
+          mkdir -p out
+          make O=out ARCH=arm64 whyred_defconfig
 
-    - name: Android kernel build (use downloaded clang)
-      uses: lemniskett/android-kernel-actions@master
-      id: build
-      env:
-        NAME: Loganysl
-        PATH: ${{ github.workspace }}/weebx-clang/bin:${{ env.PATH }}
-        CC: ${{ github.workspace }}/weebx-clang/bin/clang
-      with:
-        arch: arm64
-        compiler: local
-        defconfig: whyred_defconfig
-        image: Image.gz-dtb
+      - name: Build Kernel
+        run: |
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          export KBUILD_BUILD_USER="github-actions"
+          export KBUILD_BUILD_HOST="github"
+          make -j$(nproc) O=out ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-    - name: Show build outputs (debug)
-      if: always()
-      run: |
-        echo "Build step outputs:"
-        echo "outfile: ${{ steps.build.outputs.outfile }}"
-        ls -la out || true
-        find . -maxdepth 3 -type f -name "*.ko" -o -name "Image*" -print || true
+      - name: Verify Output
+        run: |
+          if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            echo "❌ Build failed: Image.gz-dtb not found!"
+            exit 1
+          fi
 
-    - name: Upload Kernel and Modules
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel_build
-        path: |
-          ${{ steps.build.outputs.outfile }}
-          ./out/*.ko
-          ./out/Image*
+      - name: Upload Artifact (Image.gz-dtb)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image.gz-dtb
+          path: out/arch/arm64/boot/Image.gz-dtb
